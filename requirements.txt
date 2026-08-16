@@ -1,0 +1,16 @@
+langchain
+langchain-community
+langchain-groq
+groq
+sentence-transformers
+faiss-cpu
+pypdf
+unstructured
+markdown
+python-dotenv
+fastapi
+uvicorn[standard]
+requests
+beautifulsoup4
+trafilatura
+PyGithub
