@@ -1,16 +1,15 @@
 """
 Loads the FAISS index built in Step 3, retrieves relevant chunks for
-a given question, and asks a Groq-hosted LLM to answer using only
-those chunks — with the source file cited.
+a given question using hybrid search + re-ranking (Step 10), and asks
+a Groq-hosted LLM to answer using only those chunks — with the
+source file cited.
 """
 
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 
-from app.config import EMBEDDING_MODEL_NAME, GROQ_LLM_MODEL, GROQ_API_KEY
-from app.core.build_index import INDEX_PATH
+from app.config import GROQ_LLM_MODEL, GROQ_API_KEY
+from app.core.hybrid_retriever import HybridRetriever
 
 PROMPT_TEMPLATE = """You are a helpful support docs assistant.
 Answer the question using ONLY the context below. If the answer isn't
@@ -23,18 +22,21 @@ Question: {question}
 
 Answer (mention which source file(s) you used):"""
 
+# Load the hybrid retriever once, when this module is first imported,
+# so it isn't rebuilt on every single question (rebuilding is slow).
+_retriever = None
 
-def load_retriever(index_path: str = INDEX_PATH, k: int = 3):
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
-    vectorstore = FAISS.load_local(
-        index_path, embeddings, allow_dangerous_deserialization=True
-    )
-    return vectorstore.as_retriever(search_kwargs={"k": k})
+
+def get_retriever():
+    global _retriever
+    if _retriever is None:
+        _retriever = HybridRetriever(k=3)
+    return _retriever
 
 
 def ask(question: str) -> dict:
-    retriever = load_retriever()
-    relevant_chunks = retriever.invoke(question)
+    retriever = get_retriever()
+    relevant_chunks = retriever.retrieve(question)
 
     if not relevant_chunks:
         return {"answer": "I couldn't find anything relevant in the docs.", "sources": []}
@@ -52,7 +54,10 @@ def ask(question: str) -> dict:
 
     sources = list({c.metadata.get("source_file", "unknown") for c in relevant_chunks})
 
-    return {"answer": response.content, "sources": sources}
+    import re
+    clean_answer = re.sub(r"<think>.*?</think>", "", response.content, flags=re.DOTALL).strip()
+
+    return {"answer": clean_answer, "sources": sources}
 
 
 if __name__ == "__main__":
