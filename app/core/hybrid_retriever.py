@@ -8,6 +8,7 @@ content (FAISS is great at this) — each covers the other's blind spots.
 from rank_bm25 import BM25Okapi
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from sentence_transformers import CrossEncoder
 
 from app.config import EMBEDDING_MODEL_NAME
 from app.core.build_index import INDEX_PATH
@@ -30,8 +31,6 @@ class HybridRetriever:
         )
 
         # --- BM25 (keyword) side ---
-        # We rebuild the same chunks BM25 needs directly from source docs,
-        # so both retrievers are searching over the exact same chunk set.
         documents = load_documents_from_folder(data_folder)
         splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
         self.chunks = splitter.split_documents(documents)
@@ -39,28 +38,35 @@ class HybridRetriever:
         tokenized_corpus = [_simple_tokenize(doc.page_content) for doc in self.chunks]
         self.bm25 = BM25Okapi(tokenized_corpus)
 
-    def retrieve(self, query: str):
-        # Semantic results from FAISS
-        semantic_results = self.vectorstore.similarity_search(query, k=self.k)
+        # --- Cross-encoder for re-ranking ---
+        self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-        # Keyword results from BM25
+    def retrieve(self, query: str):
+        semantic_results = self.vectorstore.similarity_search(query, k=self.k * 2)
+
         tokenized_query = _simple_tokenize(query)
         bm25_scores = self.bm25.get_scores(tokenized_query)
         top_bm25_indices = sorted(
             range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True
-        )[: self.k]
+        )[: self.k * 2]
         keyword_results = [self.chunks[i] for i in top_bm25_indices]
 
-        # Merge results, removing duplicates (same chunk found by both methods)
         seen = set()
-        merged = []
+        candidates = []
         for doc in semantic_results + keyword_results:
             key = doc.page_content
             if key not in seen:
                 seen.add(key)
-                merged.append(doc)
+                candidates.append(doc)
 
-        return merged
+        if not candidates:
+            return []
+
+        pairs = [[query, doc.page_content] for doc in candidates]
+        scores = self.reranker.predict(pairs)
+
+        ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+        return [doc for doc, score in ranked[: self.k]]
 
 
 if __name__ == "__main__":
